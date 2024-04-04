@@ -84,17 +84,6 @@ gs-extract-mesh -m ./data/1750250955326095360_data/result -o ./output/1750250955
 Replace `./data/1750250955326095360_data/result` with the path to your input output_dir.
 Replace `./output/1750250955326095360_data` with the desired path for the output mesh.
 
-### Binding Texture to the Mesh
-The output data is organized in the same format as [mvs-texturing](https://github.com/nmoehrle/mvs-texturing/tree/master). Follow these steps to add texture to the mesh:
-
-* Compile the mvs-texturing repository on your system.
-* Add the build/bin directory to your PATH environment variable
-* Navigate to the output directory containing the mesh.
-* Run the following command:
-```
-texrecon ./images ./fused_mesh.ply ./textured_mesh --outlier_removal=gauss_clamping --data_term=area --no_intermediate_results
-```
-
 # Plan of Release
 GauStudio will supoort more 3DGS-based methods in the near future, if you are also interested in GauStudio and want to improve it, welcome to submit PR!
 - [x] Release mesh extraction and rendering toolkit

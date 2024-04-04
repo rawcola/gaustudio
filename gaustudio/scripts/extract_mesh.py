@@ -10,9 +10,9 @@ from pathlib import Path
 import cv2
 import torchvision
 from tqdm import tqdm
-import vdbfusion
 import trimesh
 import numpy as np
+import open3d as o3d
 from torchvision.transforms.functional import to_pil_image, pil_to_tensor
 def searchForMaxIteration(folder):
     saved_iters = [int(fname.split("_")[-1]) for fname in os.listdir(folder)]
@@ -78,7 +78,11 @@ def main():
         for camera_json in camera_data:
             camera = JSON_to_camera(camera_json, "cuda")
             cameras.append(camera)
-        vdb_volume = vdbfusion.VDBVolume(voxel_size=0.02, sdf_trunc=0.08, space_carving=True) # For Scene
+        o3d_volume = o3d.pipelines.integration.ScalableTSDFVolume(
+            voxel_length=0.02,
+            sdf_trunc=0.08,
+            color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
+        )
     else:
         assert "Camera data not found at {}".format(args.camera)
 
@@ -96,51 +100,29 @@ def main():
             render_pkg = renderer.render(camera, pcd)
         rendering, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         rendered_depth = render_pkg["rendered_median_depth"][0]
-        invalid_mask = rendered_depth > 10.
+        invalid_mask = rendered_depth == 15.0
 
         rendering[:, invalid_mask] = 0.
         rendered_depth[invalid_mask] = 0
 
-        rendered_pcd_cam, rendered_pcd_world = depth2point(rendered_depth, camera.intrinsics.to(rendered_depth.device), 
-                                                                      camera.extrinsics.to(rendered_depth.device))
-        rendered_pcd_world = rendered_pcd_world[~invalid_mask]
-        
-        P = camera.extrinsics
-        P_inv = P.inverse()
-        cam_center = P_inv[:3, 3]
-        vdb_volume.integrate(rendered_pcd_world.double().cpu().numpy(), extrinsic=cam_center.double().cpu().numpy())
-        torchvision.utils.save_image(rendering, os.path.join(render_path, f"{camera.image_name}.png"))
-        torchvision.utils.save_image((~invalid_mask).float(), os.path.join(mask_path, f"{camera.image_name}.png"))
-        
-        # Save camera infromation
-        cam_path = os.path.join(render_path, f"{camera.image_name}.cam")
-        K = camera.intrinsics.cpu().numpy()
-        fx = K[0, 0]
-        fy = K[1, 1]
+        intrinsic = camera.intrinsics.cpu().numpy()
+        fx, fy, cx, cy = intrinsic[0, 0], intrinsic[1, 1], intrinsic[0, 2], intrinsic[1, 2]
         paspect = fy / fx
         width, height = camera.image_width, camera.image_height
-        dim_aspect = width / height
-        img_aspect = dim_aspect * paspect
-        if img_aspect < 1.0:
-            flen = fy / height
-        else:
-            flen = fx / width
-        ppx = K[0, 2] / width
-        ppy = K[1, 2] / height
-
-        P = P.cpu().numpy()
-        with open(cam_path, 'w') as f:
-            s1, s2 = '', ''
-            for i in range(3):
-                for j in range(3):
-                    s1 += str(P[i][j]) + ' '
-                s2 += str(P[i][3]) + ' '
-            f.write(s2 + s1[:-1] + '\n')
-            f.write(str(flen) + ' 0 0 ' + str(paspect) + ' ' + str(ppx) + ' ' + str(ppy) + '\n')
         
-    vertices, faces = vdb_volume.extract_triangle_mesh(min_weight=5)
-    geo_mesh = trimesh.Trimesh(vertices, faces)
-    geo_mesh.export(os.path.join(work_dir, 'fused_mesh.ply'))
+        rendered_depth_o3d = o3d.geometry.Image(rendered_depth.cpu().numpy())
+        rendered_rgb_np = np.asarray(rendering.permute(1,2,0).cpu().numpy(), order="C")
+        rendered_rgb_o3d = o3d.geometry.Image((rendered_rgb_np*255).astype(np.uint8))
+        rgbd_o3d = o3d.geometry.RGBDImage.create_from_color_and_depth(
+            rendered_rgb_o3d, rendered_depth_o3d, depth_scale=1.0, convert_rgb_to_intensity=False
+        )
+        intrinsic_o3d = o3d.camera.PinholeCameraIntrinsic(width=width, height=height, fx=fx,  fy=fy, cx=cx, cy=cy)
+        extrinsic_np = camera.extrinsics.cpu().numpy()
+        o3d_volume.integrate(rgbd_o3d, intrinsic_o3d, extrinsic_np)
+
+    color_mesh = o3d_volume.extract_triangle_mesh()
+    o3d.io.write_triangle_mesh(os.path.join(work_dir, 'color_mesh.ply'), color_mesh)
+    print("Saved color_mesh to", os.path.join(work_dir, 'color_mesh.ply'))
     
     # Clean Mesh
     if args.clean:
