@@ -151,10 +151,8 @@ def main():
         gs_mesh.remove_unreferenced_vertices()
         
         print(f"Removed {triangles_to_remove.sum()} triangles")
-        print(f"Saving processed mesh to {gs_mesh_path}") 
-        o3d.io.write_triangle_mesh(gs_mesh_path, gs_mesh)
-    else:
-        o3d.io.write_triangle_mesh(gs_mesh_path, gs_mesh)
+    print(f"Saving processed mesh to {gs_mesh_path}") 
+    o3d.io.write_triangle_mesh(gs_mesh_path, gs_mesh)
 
 if __name__ == '__main__':
     main()
