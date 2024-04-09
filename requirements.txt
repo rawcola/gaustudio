@@ -3,7 +3,6 @@ torch
 torchvision
 tqdm
 opencv-python-headless
-trimesh
 omegaconf
 einops
 kiui

@@ -10,7 +10,6 @@ from pathlib import Path
 import cv2
 import torchvision
 from tqdm import tqdm
-import trimesh
 import numpy as np
 import open3d as o3d
 from torchvision.transforms.functional import to_pil_image, pil_to_tensor

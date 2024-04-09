@@ -7,7 +7,7 @@ A collaboration friendly studio for Gaussians Splatting
 '''
 
 [build-system]
-requires = [ "setuptools", "wheel", "torch", "open3d", "tqdm", "trimesh", "pymeshlab", "numpy", "rembg"]
+requires = [ "setuptools", "wheel", "torch", "open3d", "tqdm", "numpy", "rembg"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
