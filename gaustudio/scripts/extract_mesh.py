@@ -89,10 +89,6 @@ def main():
     bg_color = [1,1,1] if args.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-    render_path = os.path.join(work_dir, "images")
-    mask_path = os.path.join(work_dir, "masks")
-    os.makedirs(render_path, exist_ok=True)
-    os.makedirs(mask_path, exist_ok=True)
     print("Fusing mesh...")
     for camera in tqdm(cameras[::3]):
         camera.downsample_scale(args.resolution)
@@ -157,7 +153,8 @@ def main():
         print(f"Removed {triangles_to_remove.sum()} triangles")
         print(f"Saving processed mesh to {gs_mesh_path}") 
         o3d.io.write_triangle_mesh(gs_mesh_path, gs_mesh)
-
+    else:
+        o3d.io.write_triangle_mesh(gs_mesh_path, gs_mesh)
 
 if __name__ == '__main__':
     main()
