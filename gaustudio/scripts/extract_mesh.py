@@ -124,38 +124,39 @@ def main():
     gs_mesh = o3d_volume.extract_triangle_mesh()
     gs_mesh_path = os.path.join(work_dir, 'gs_mesh.ply')
 
-    # Clean Mesh
-    clean_threshold = 0.05
-    print("Analyzing connected components...")
-    (triangle_clusters, 
-    cluster_n_triangles,
-    cluster_area) = gs_mesh.cluster_connected_triangles()
-    
-    print("Finding largest component...") 
-    triangle_clusters = np.array(triangle_clusters)  
-    cluster_n_triangles = np.array(cluster_n_triangles)
-    
-    largest_cluster_idx = cluster_n_triangles.argmax()
-    largest_cluster_n_triangles = cluster_n_triangles[largest_cluster_idx]
+    if args.clean:
+        # Clean Mesh
+        clean_threshold = 0.05
+        print("Analyzing connected components...")
+        (triangle_clusters, 
+        cluster_n_triangles,
+        cluster_area) = gs_mesh.cluster_connected_triangles()
+        
+        print("Finding largest component...") 
+        triangle_clusters = np.array(triangle_clusters)  
+        cluster_n_triangles = np.array(cluster_n_triangles)
+        
+        largest_cluster_idx = cluster_n_triangles.argmax()
+        largest_cluster_n_triangles = cluster_n_triangles[largest_cluster_idx]
 
-    print(f"Largest component has {largest_cluster_n_triangles} triangles")
-    
-    triangles_keep_mask = np.zeros_like(triangle_clusters, dtype=np.int32)
-    saved_clusters = []
-    
-    print("Removing small components...")
-    for i, n_tri in enumerate(cluster_n_triangles):
-        if n_tri > clean_threshold * largest_cluster_n_triangles:
-            saved_clusters.append(i)
-            triangles_keep_mask += triangle_clusters == i
-            
-    triangles_to_remove = triangles_keep_mask == 0
-    gs_mesh.remove_triangles_by_mask(triangles_to_remove)
-    gs_mesh.remove_unreferenced_vertices()
-    
-    print(f"Removed {triangles_to_remove.sum()} triangles")
-    print(f"Saving processed mesh to {gs_mesh_path}") 
-    o3d.io.write_triangle_mesh(gs_mesh_path, gs_mesh)
+        print(f"Largest component has {largest_cluster_n_triangles} triangles")
+        
+        triangles_keep_mask = np.zeros_like(triangle_clusters, dtype=np.int32)
+        saved_clusters = []
+        
+        print("Removing small components...")
+        for i, n_tri in enumerate(cluster_n_triangles):
+            if n_tri > clean_threshold * largest_cluster_n_triangles:
+                saved_clusters.append(i)
+                triangles_keep_mask += triangle_clusters == i
+                
+        triangles_to_remove = triangles_keep_mask == 0
+        gs_mesh.remove_triangles_by_mask(triangles_to_remove)
+        gs_mesh.remove_unreferenced_vertices()
+        
+        print(f"Removed {triangles_to_remove.sum()} triangles")
+        print(f"Saving processed mesh to {gs_mesh_path}") 
+        o3d.io.write_triangle_mesh(gs_mesh_path, gs_mesh)
 
 
 if __name__ == '__main__':
