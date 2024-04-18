@@ -12,10 +12,46 @@ import torchvision
 from tqdm import tqdm
 import numpy as np
 import open3d as o3d
+import concurrent.futures
+from tqdm import tqdm
+import threading
 from torchvision.transforms.functional import to_pil_image, pil_to_tensor
 def searchForMaxIteration(folder):
     saved_iters = [int(fname.split("_")[-1]) for fname in os.listdir(folder)]
     return max(saved_iters)
+
+volume_lock = threading.Lock()
+def render_and_integrate(camera, args, renderer, o3d_volume, pcd):
+    camera.downsample_scale(args.resolution)
+    camera = camera.to("cuda")
+
+    with torch.no_grad():
+        render_pkg = renderer.render(camera, pcd)
+
+    rendering, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+
+    rendered_depth = render_pkg["rendered_median_depth"][0]
+    invalid_mask = rendered_depth == 15.0
+    rendering[:, invalid_mask] = 0.
+    rendered_depth[invalid_mask] = 0
+
+    intrinsic = camera.intrinsics.cpu().numpy()
+    fx, fy, cx, cy = intrinsic[0, 0], intrinsic[1, 1], intrinsic[0, 2], intrinsic[1, 2]
+    paspect = fy / fx
+    width, height = camera.image_width, camera.image_height
+
+    rendered_depth_o3d = o3d.geometry.Image(rendered_depth.cpu().numpy())
+    rendered_rgb_np = np.asarray(rendering.permute(1, 2, 0).cpu().numpy(), order="C")
+    rendered_rgb_o3d = o3d.geometry.Image((rendered_rgb_np * 255).astype(np.uint8))
+
+    rgbd_o3d = o3d.geometry.RGBDImage.create_from_color_and_depth(
+        rendered_rgb_o3d, rendered_depth_o3d, depth_scale=1.0, convert_rgb_to_intensity=False
+    )
+
+    intrinsic_o3d = o3d.camera.PinholeCameraIntrinsic(width=width, height=height, fx=fx, fy=fy, cx=cx, cy=cy)
+    extrinsic_np = camera.extrinsics.cpu().numpy()
+    with volume_lock:
+        o3d_volume.integrate(rgbd_o3d, intrinsic_o3d, extrinsic_np)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -27,6 +63,7 @@ def main():
     parser.add_argument('--load_iteration', default=-1, type=int, help='iteration to be rendered')
     parser.add_argument('--resolution', default=2, type=int, help='downscale resolution')
     parser.add_argument('--sh', default=0, type=int, help='default SH degree')
+    parser.add_argument('--num_worker', default=8, type=int, help='number of worker')
     parser.add_argument('--white_background', action='store_true', help='use white background')
     parser.add_argument('--clean', action='store_true', help='perform a clean operation')
     args, extras = parser.parse_known_args()
@@ -89,33 +126,19 @@ def main():
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
     print("Fusing mesh...")
-    for camera in tqdm(cameras[::3]):
-        camera.downsample_scale(args.resolution)
-        camera = camera.to("cuda")
-        with torch.no_grad():
-            render_pkg = renderer.render(camera, pcd)
-        rendering, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-        rendered_depth = render_pkg["rendered_median_depth"][0]
-        invalid_mask = rendered_depth == 15.0
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.num_worker) as executor:
+        futures = []
+        for camera in cameras[::3]:  # Process every third camera
+            future = executor.submit(render_and_integrate, camera, args, renderer, o3d_volume, pcd)
+            futures.append(future)
 
-        rendering[:, invalid_mask] = 0.
-        rendered_depth[invalid_mask] = 0
-
-        intrinsic = camera.intrinsics.cpu().numpy()
-        fx, fy, cx, cy = intrinsic[0, 0], intrinsic[1, 1], intrinsic[0, 2], intrinsic[1, 2]
-        paspect = fy / fx
-        width, height = camera.image_width, camera.image_height
-        
-        rendered_depth_o3d = o3d.geometry.Image(rendered_depth.cpu().numpy())
-        rendered_rgb_np = np.asarray(rendering.permute(1,2,0).cpu().numpy(), order="C")
-        rendered_rgb_o3d = o3d.geometry.Image((rendered_rgb_np*255).astype(np.uint8))
-        rgbd_o3d = o3d.geometry.RGBDImage.create_from_color_and_depth(
-            rendered_rgb_o3d, rendered_depth_o3d, depth_scale=1.0, convert_rgb_to_intensity=False
-        )
-        intrinsic_o3d = o3d.camera.PinholeCameraIntrinsic(width=width, height=height, fx=fx,  fy=fy, cx=cx, cy=cy)
-        extrinsic_np = camera.extrinsics.cpu().numpy()
-        o3d_volume.integrate(rgbd_o3d, intrinsic_o3d, extrinsic_np)
-
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures)):
+            try:
+                future.result()
+            except Exception as e:
+                print(f"Error occurred: {e}")
+    
     gs_mesh = o3d_volume.extract_triangle_mesh()
     gs_mesh_path = os.path.join(work_dir, 'gs_mesh.ply')
 
