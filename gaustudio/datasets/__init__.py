@@ -89,11 +89,9 @@ class Camera:
         self._setup()
 
     def _setup(self):
-        if self.world_view_transform is None:
-            self.world_view_transform = torch.tensor(getWorld2View2(self.R, self.T, self.trans, self.scale)).transpose(0, 1)
-        if self.full_proj_transform is None:
-            projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1)
-            self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))).squeeze(0)
+        self.world_view_transform = torch.tensor(getWorld2View2(self.R, self.T, self.trans, self.scale)).transpose(0, 1)
+        projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1)
+        self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))).squeeze(0)
         
         if self.image_path is not None:
             self.image = torch.from_numpy(np.array(Image.open(self.image_path).convert("RGB"))) / 255.0
@@ -123,14 +121,20 @@ class Camera:
     
     @property
     def intrinsics(self):
-        tan_fovx = np.tan(self.FoVx / 2.0)
-        tan_fovy = np.tan(self.FoVy / 2.0)
-        focal_y = self.image_height / (2.0 * tan_fovy)
-        focal_x = self.image_width / (2.0 * tan_fovx)
-        return torch.tensor([[focal_x, 0, self.image_width / 2], 
-                             [0, focal_y, self.image_height / 2], 
+        return torch.tensor([[self.focal_x, 0, self.image_width / 2], 
+                             [0, self.focal_y, self.image_height / 2], 
                              [0, 0, 1]]).float()
      
+    @property
+    def focal_y(self):
+        tan_fovx = np.tan(self.FoVx / 2.0)
+        return self.image_width / (2.0 * tan_fovx)
+
+    @property
+    def focal_x(self):
+        tan_fovy = np.tan(self.FoVy / 2.0)
+        return self.image_height / (2.0 * tan_fovy)
+
     @extrinsics.setter
     def extrinsics(self, value):
         """Sets the extrinsic parameters of the camera"""
@@ -149,6 +153,16 @@ class Camera:
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
 
+    def translate(self, translation):
+        """
+        Translates the camera by the given translation vector.
+        
+        Args:
+            translation (list or np.ndarray): A list or array of three values representing the translation vector.
+        """
+        self.T += translation
+        self._setup()
+        
     def downsample(self, resolution):
         if self.image is not None:
             resized_image_rgb = PILtoTorch(self.image, resolution)

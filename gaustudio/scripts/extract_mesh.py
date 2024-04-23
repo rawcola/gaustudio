@@ -13,6 +13,8 @@ from tqdm import tqdm
 import vdbfusion
 import trimesh
 import numpy as np
+import copy
+from kornia.geometry.depth import depth_from_disparity
 from torchvision.transforms.functional import to_pil_image, pil_to_tensor
 def searchForMaxIteration(folder):
     saved_iters = [int(fname.split("_")[-1]) for fname in os.listdir(folder)]
@@ -28,6 +30,7 @@ def main():
     parser.add_argument('--load_iteration', default=-1, type=int, help='iteration to be rendered')
     parser.add_argument('--resolution', default=2, type=int, help='downscale resolution')
     parser.add_argument('--sh', default=0, type=int, help='default SH degree')
+    parser.add_argument('--baseline', default=0.2, type=float, help='default baseline length')
     parser.add_argument('--white_background', action='store_true', help='use white background')
     parser.add_argument('--clean', action='store_true', help='perform a clean operation')
     args, extras = parser.parse_known_args()
@@ -51,6 +54,7 @@ def main():
     renderer = renderers.make(config.renderer)
     pcd.active_sh_degree = args.sh
     
+    disparity_predictor = torch.hub.load("hugoycj/unimatch-hub", "UniMatchStereo", trust_repo=True)
     model_path = args.model
     if os.path.isdir(model_path):
         if args.load_iteration == -1:
@@ -78,7 +82,7 @@ def main():
         for camera_json in camera_data:
             camera = JSON_to_camera(camera_json, "cuda")
             cameras.append(camera)
-        vdb_volume = vdbfusion.VDBVolume(voxel_size=0.01, sdf_trunc=0.04, space_carving=False) # For Scene
+        vdb_volume = vdbfusion.VDBVolume(voxel_size=0.01, sdf_trunc=0.04, space_carving=True) # For Scene
     else:
         assert "Camera data not found at {}".format(args.camera)
 
@@ -94,22 +98,40 @@ def main():
         camera = camera.to("cuda")
         with torch.no_grad():
             render_pkg = renderer.render(camera, pcd)
+
+            stereo_camera = copy.deepcopy(camera)
+            stereo_camera.translate([-1 * args.baseline, 0, 0])
+            stereo_render_pkg = renderer.render(stereo_camera.to("cuda"), pcd)
         rendering = render_pkg["render"]
-        rendered_depth = render_pkg["rendered_median_depth"][0]
-        invalid_mask = render_pkg["rendered_final_opacity"][0] < 0.5
+        stereo_rendering = stereo_render_pkg["render"]
+        
+        rendering_np = (rendering.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+        stereo_rendering_np = (stereo_rendering.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+        with torch.no_grad():
+            disparity = disparity_predictor.infer_cv2(rendering_np, stereo_rendering_np)
 
-        rendering[:, invalid_mask] = 0.
-        rendered_depth[invalid_mask] = 0
-
-        rendered_pcd_cam, rendered_pcd_world = depth2point(rendered_depth, camera.intrinsics.to(rendered_depth.device), 
-                                                                      camera.extrinsics.to(rendered_depth.device))
+        invalid_mask = render_pkg['rendered_final_opacity'][0].cpu() < 0.5
+        stereo_depth = depth_from_disparity(torch.tensor(disparity), args.baseline, camera.focal_x)
+        stereo_depth[invalid_mask] = 0
+        
+        rendered_pcd_cam, rendered_pcd_world = depth2point(stereo_depth, camera.intrinsics.to(stereo_depth.device), 
+                                                                      camera.extrinsics.to(stereo_depth.device))
         rendered_pcd_world = rendered_pcd_world[~invalid_mask]
+        
+        # rendered_depth = render_pkg["rendered_median_depth"][0]
+        # invalid_mask = render_pkg["rendered_final_opacity"][0] < 0.5
+        # rendered_depth[invalid_mask] = 0
+        
+        # rendered_pcd_cam, rendered_pcd_world = depth2point(rendered_depth, camera.intrinsics.to(rendered_depth.device), 
+        #                                                               camera.extrinsics.to(rendered_depth.device))
+        # rendered_pcd_world = rendered_pcd_world[~invalid_mask]
         
         P = camera.extrinsics
         P_inv = P.inverse()
         cam_center = P_inv[:3, 3]
         vdb_volume.integrate(rendered_pcd_world.double().cpu().numpy(), extrinsic=cam_center.double().cpu().numpy())
         torchvision.utils.save_image(rendering, os.path.join(render_path, f"{camera.image_name}.png"))
+        torchvision.utils.save_image(stereo_rendering, os.path.join(render_path, f"{camera.image_name}_right.png"))
         torchvision.utils.save_image((~invalid_mask).float(), os.path.join(mask_path, f"{camera.image_name}.png"))
         
         # Save camera infromation
