@@ -4,6 +4,7 @@ torchvision
 tqdm
 opencv-python-headless
 vdbfusion
+kornia
 trimesh
 omegaconf
 einops
