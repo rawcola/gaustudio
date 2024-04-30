@@ -20,6 +20,43 @@ def searchForMaxIteration(folder):
     saved_iters = [int(fname.split("_")[-1]) for fname in os.listdir(folder)]
     return max(saved_iters)
 
+def compute_stereo_depth(camera, pcd, renderer, disparity_predictor, baseline):
+    with torch.no_grad():
+        render_pkg = renderer.render(camera, pcd)
+        stereo_camera = copy.deepcopy(camera)
+        stereo_camera.translate([-1 * baseline, 0, 0])
+        stereo_render_pkg = renderer.render(stereo_camera.to("cuda"), pcd)
+
+    rendering = render_pkg["render"]
+    stereo_rendering = stereo_render_pkg["render"]
+
+    rendering_np = (rendering.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+    stereo_rendering_np = (stereo_rendering.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+
+    with torch.no_grad():
+        disparity = disparity_predictor.infer_cv2(rendering_np, stereo_rendering_np)
+
+    invalid_mask = render_pkg['rendered_final_opacity'][0].cpu() < 0.5
+    stereo_depth = depth_from_disparity(torch.tensor(disparity), baseline, camera.focal_x)
+    invalid_mask = invalid_mask & (stereo_depth < 2*baseline) & (stereo_depth > 10*baseline)
+    stereo_depth[invalid_mask] = 0
+
+    return render_pkg["render"], stereo_depth, invalid_mask
+
+def compute_median_depth(camera, pcd, renderer):
+    with torch.no_grad():
+        render_pkg = renderer.render(camera, pcd)
+
+    rendered_depth = render_pkg["rendered_median_depth"][0]
+    invalid_mask = render_pkg["rendered_final_opacity"][0] < 0.5
+    rendered_depth[invalid_mask] = 0
+
+    return render_pkg["render"], rendered_depth, invalid_mask
+
+def compute_ray_intersect_depth(camera, pcd, renderer):
+    # Implement the logic to compute depth from ray intersection
+    raise NotImplementedError("Ray intersection depth computation not implemented yet.")
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', help='path to config file', default='vanilla')
@@ -30,7 +67,8 @@ def main():
     parser.add_argument('--load_iteration', default=-1, type=int, help='iteration to be rendered')
     parser.add_argument('--resolution', default=2, type=int, help='downscale resolution')
     parser.add_argument('--sh', default=0, type=int, help='default SH degree')
-    parser.add_argument('--baseline', default=0.2, type=float, help='default baseline length')
+    parser.add_argument('--depth-mode', '-d', default='median', choices=['median', 'stereo', 'ray_intersect'],
+                    help='depth computation mode: median, stereo, or ray_intersect')
     parser.add_argument('--white_background', action='store_true', help='use white background')
     parser.add_argument('--clean', action='store_true', help='perform a clean operation')
     args, extras = parser.parse_known_args()
@@ -42,7 +80,7 @@ def main():
     
     from gaustudio.utils.misc import load_config
     from gaustudio import models, datasets, renderers
-    from gaustudio.datasets.utils import JSON_to_camera
+    from gaustudio.datasets.utils import JSON_to_camera, getNerfppNorm
     from gaustudio.utils.graphics_utils import depth2point
     # parse YAML config to OmegaConf
     script_dir = os.path.dirname(__file__)
@@ -54,7 +92,6 @@ def main():
     renderer = renderers.make(config.renderer)
     pcd.active_sh_degree = args.sh
     
-    disparity_predictor = torch.hub.load("hugoycj/unimatch-hub", "UniMatchStereo", trust_repo=True)
     model_path = args.model
     if os.path.isdir(model_path):
         if args.load_iteration == -1:
@@ -82,10 +119,16 @@ def main():
         for camera_json in camera_data:
             camera = JSON_to_camera(camera_json, "cuda")
             cameras.append(camera)
-        vdb_volume = vdbfusion.VDBVolume(voxel_size=0.01, sdf_trunc=0.04, space_carving=True) # For Scene
+        vdb_volume = vdbfusion.VDBVolume(voxel_size=0.01, sdf_trunc=0.04, space_carving=False) # For Scene
     else:
         assert "Camera data not found at {}".format(args.camera)
 
+    disparity_predictor = None
+    scene_radius = getNerfppNorm(cameras)["radius"]
+    if args.depth_mode == 'stereo':
+        disparity_predictor = torch.hub.load("hugoycj/unimatch-hub", "UniMatchStereo", trust_repo=True)
+        baseline = scene_radius * 0.05
+                                 
     bg_color = [1,1,1] if args.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
@@ -96,42 +139,25 @@ def main():
     for camera in tqdm(cameras[::3]):
         camera.downsample_scale(args.resolution)
         camera = camera.to("cuda")
-        with torch.no_grad():
-            render_pkg = renderer.render(camera, pcd)
 
-            stereo_camera = copy.deepcopy(camera)
-            stereo_camera.translate([-1 * args.baseline, 0, 0])
-            stereo_render_pkg = renderer.render(stereo_camera.to("cuda"), pcd)
-        rendering = render_pkg["render"]
-        stereo_rendering = stereo_render_pkg["render"]
-        
-        rendering_np = (rendering.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-        stereo_rendering_np = (stereo_rendering.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-        with torch.no_grad():
-            disparity = disparity_predictor.infer_cv2(rendering_np, stereo_rendering_np)
+        if args.depth_mode == 'median':
+            rendering, depth, invalid_mask = compute_median_depth(camera, pcd, renderer)
+        elif args.depth_mode == 'stereo':
+            rendering, depth, invalid_mask = compute_stereo_depth(camera, pcd, renderer, disparity_predictor, baseline)
+        elif args.depth_mode == 'ray_intersect':
+            rendering, depth, invalid_mask = compute_ray_intersect_depth(camera, pcd, renderer)
+        else:
+            raise ValueError(f"Invalid depth mode: {args.depth_mode}")
 
-        invalid_mask = render_pkg['rendered_final_opacity'][0].cpu() < 0.5
-        stereo_depth = depth_from_disparity(torch.tensor(disparity), args.baseline, camera.focal_x)
-        stereo_depth[invalid_mask] = 0
-        
-        rendered_pcd_cam, rendered_pcd_world = depth2point(stereo_depth, camera.intrinsics.to(stereo_depth.device), 
-                                                                      camera.extrinsics.to(stereo_depth.device))
+        rendered_pcd_cam, rendered_pcd_world = depth2point(depth, camera.intrinsics.to(depth.device),
+                                                        camera.extrinsics.to(depth.device))
         rendered_pcd_world = rendered_pcd_world[~invalid_mask]
-        
-        # rendered_depth = render_pkg["rendered_median_depth"][0]
-        # invalid_mask = render_pkg["rendered_final_opacity"][0] < 0.5
-        # rendered_depth[invalid_mask] = 0
-        
-        # rendered_pcd_cam, rendered_pcd_world = depth2point(rendered_depth, camera.intrinsics.to(rendered_depth.device), 
-        #                                                               camera.extrinsics.to(rendered_depth.device))
-        # rendered_pcd_world = rendered_pcd_world[~invalid_mask]
-        
+    
         P = camera.extrinsics
         P_inv = P.inverse()
         cam_center = P_inv[:3, 3]
         vdb_volume.integrate(rendered_pcd_world.double().cpu().numpy(), extrinsic=cam_center.double().cpu().numpy())
         torchvision.utils.save_image(rendering, os.path.join(render_path, f"{camera.image_name}.png"))
-        torchvision.utils.save_image(stereo_rendering, os.path.join(render_path, f"{camera.image_name}_right.png"))
         torchvision.utils.save_image((~invalid_mask).float(), os.path.join(mask_path, f"{camera.image_name}.png"))
         
         # Save camera infromation
